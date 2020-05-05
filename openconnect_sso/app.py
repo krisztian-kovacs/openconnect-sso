@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import json
 import logging
+import os
 import shlex
 import signal
 from pathlib import Path
@@ -25,6 +26,8 @@ def run(args):
     configure_logger(logging.getLogger(), args.log_level)
 
     try:
+        if os.name == "nt":
+            asyncio.set_event_loop(asyncio.ProactorEventLoop())
         return asyncio.get_event_loop().run_until_complete(_run(args))
     except KeyboardInterrupt:
         logger.warn("CTRL-C pressed, exiting")
@@ -125,7 +128,10 @@ async def select_profile(profile_list):
         ),
         values=[(p, p.name) for i, p in enumerate(profile_list)],
     ).run_async()
-    asyncio.get_event_loop().remove_signal_handler(signal.SIGWINCH)
+    # Somehow prompt_toolkit sets up a bogus signal handler upon exit
+    # TODO: Report this issue upstream
+    if hasattr(signal, "SIGWINCH"):
+        asyncio.get_event_loop().remove_signal_handler(signal.SIGWINCH)
     if not selection:
         return selection
     logger.info("Selected profile", profile=selection.name)
@@ -141,20 +147,14 @@ async def run_openconnect(auth_info, host, args):
     command_line = [
         "sudo",
         "openconnect",
-        "--cookie-on-stdin",
+        "--cookie",
+        auth_info.session_token,
         "--servercert",
         auth_info.server_cert_hash,
         *args,
+        host.vpn_url,
     ]
 
     logger.debug("Starting OpenConnect", command_line=command_line)
-    proc = await asyncio.create_subprocess_exec(
-        *command_line,
-        host.vpn_url,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=None,
-        stderr=None,
-    )
-    proc.stdin.write(f"{auth_info.session_token}\n".encode())
-    await proc.stdin.drain()
+    proc = await asyncio.create_subprocess_exec(*command_line)
     await proc.wait()
